@@ -14,12 +14,11 @@ if [ ! -d "sing-box" ]; then
 fi
 pushd sing-box
 git checkout "$COMMIT_SING_BOX"
+git restore --source "$COMMIT_SING_BOX" -- option/shadowsocks.go protocol/shadowsocks/outbound.go
+rm -f protocol/shadowsocks/tls_direct.go
 TLS_DIRECT_PATCH="$ROOT_DIR/buildScript/lib/core/patches/ss-tls-direct.patch"
-if git apply --reverse --check "$TLS_DIRECT_PATCH" >/dev/null 2>&1; then
-  echo "ss tls direct patch already applied"
-else
-  git apply "$TLS_DIRECT_PATCH"
-fi
+git apply --check "$TLS_DIRECT_PATCH" || exit 1
+git apply "$TLS_DIRECT_PATCH" || exit 1
 popd
 
 ####

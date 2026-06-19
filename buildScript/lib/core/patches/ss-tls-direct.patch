@@ -1,67 +1,67 @@
 diff --git a/option/shadowsocks.go b/option/shadowsocks.go
-index 3dc96171..cfd92a96 100644
+index 7cb656f3..4dfaf907 100644
 --- a/option/shadowsocks.go
 +++ b/option/shadowsocks.go
-@@ -23,11 +23,12 @@ type ShadowsocksDestination struct {
+@@ -25,11 +25,12 @@ type ShadowsocksDestination struct {
  type ShadowsocksOutboundOptions struct {
  	DialerOptions
  	ServerOptions
--	Method            string             `json:"method"`
--	Password          string             `json:"password"`
--	Plugin            string             `json:"plugin,omitempty"`
--	PluginOptions     string             `json:"plugin_opts,omitempty"`
--	Network           NetworkList        `json:"network,omitempty"`
--	UDPOverTCPOptions *UDPOverTCPOptions `json:"udp_over_tcp,omitempty"`
--	MultiplexOptions  *MultiplexOptions  `json:"multiplex,omitempty"`
-+	Method                string             `json:"method"`
-+	Password              string             `json:"password"`
-+	Plugin                string             `json:"plugin,omitempty"`
-+	PluginOptions         string             `json:"plugin_opts,omitempty"`
-+	Network               NetworkList        `json:"network,omitempty"`
-+	ExperimentalTLSDirect bool               `json:"experimental_tls_direct,omitempty"`
-+	UDPOverTCPOptions     *UDPOverTCPOptions `json:"udp_over_tcp,omitempty"`
-+	MultiplexOptions      *MultiplexOptions  `json:"multiplex,omitempty"`
+-	Method        string                    `json:"method"`
+-	Password      string                    `json:"password"`
+-	Plugin        string                    `json:"plugin,omitempty"`
+-	PluginOptions string                    `json:"plugin_opts,omitempty"`
+-	Network       NetworkList               `json:"network,omitempty"`
+-	UDPOverTCP    *UDPOverTCPOptions        `json:"udp_over_tcp,omitempty"`
+-	Multiplex     *OutboundMultiplexOptions `json:"multiplex,omitempty"`
++	Method                string                    `json:"method"`
++	Password              string                    `json:"password"`
++	Plugin                string                    `json:"plugin,omitempty"`
++	PluginOptions         string                    `json:"plugin_opts,omitempty"`
++	Network               NetworkList               `json:"network,omitempty"`
++	ExperimentalTLSDirect bool                      `json:"experimental_tls_direct,omitempty"`
++	UDPOverTCP            *UDPOverTCPOptions        `json:"udp_over_tcp,omitempty"`
++	Multiplex             *OutboundMultiplexOptions `json:"multiplex,omitempty"`
  }
-diff --git a/outbound/shadowsocks.go b/outbound/shadowsocks.go
-index 0741eb80..93f55866 100644
---- a/outbound/shadowsocks.go
-+++ b/outbound/shadowsocks.go
-@@ -29,6 +29,7 @@ type Shadowsocks struct {
+diff --git a/protocol/shadowsocks/outbound.go b/protocol/shadowsocks/outbound.go
+index 9b9d9252..2fa663f1 100644
+--- a/protocol/shadowsocks/outbound.go
++++ b/protocol/shadowsocks/outbound.go
+@@ -33,6 +33,7 @@ type Outbound struct {
  	method          shadowsocks.Method
  	serverAddr      M.Socksaddr
  	plugin          sip003.Plugin
 +	tlsDirect       bool
  	uotClient       *uot.Client
- 	multiplexDialer N.Dialer
+ 	multiplexDialer *mux.Client
  }
-@@ -49,6 +50,7 @@ func NewShadowsocks(ctx context.Context, router adapter.Router, logger log.Conte
- 		dialer:     dialer.New(router, options.DialerOptions),
+@@ -54,6 +55,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
+ 		dialer:     outboundDialer,
  		method:     method,
  		serverAddr: options.ServerOptions.Build(),
 +		tlsDirect:  options.ExperimentalTLSDirect,
  	}
  	if options.Plugin != "" {
- 		outbound.plugin, err = sip003.CreatePlugin(options.Plugin, options.PluginOptions, router, outbound.dialer, outbound.serverAddr)
-@@ -151,7 +153,11 @@ func (h *shadowsocksDialer) DialContext(ctx context.Context, network string, des
+ 		outbound.plugin, err = sip003.CreatePlugin(ctx, options.Plugin, options.PluginOptions, router, outbound.dialer, outbound.serverAddr)
+@@ -154,7 +156,11 @@ func (h *shadowsocksDialer) DialContext(ctx context.Context, network string, des
  		if err != nil {
  			return nil, err
  		}
 -		return h.method.DialEarlyConn(outConn, destination), nil
 +		conn := h.method.DialEarlyConn(outConn, destination)
 +		if h.tlsDirect {
-+			conn = newShadowsocksTLSDirectConn(conn, outConn)
++			conn = newTLSDirectConn(conn, outConn)
 +		}
 +		return conn, nil
  	case N.NetworkUDP:
  		outConn, err := h.dialer.DialContext(ctx, N.NetworkUDP, h.serverAddr)
  		if err != nil {
-diff --git a/outbound/shadowsocks_tls_direct.go b/outbound/shadowsocks_tls_direct.go
+diff --git a/protocol/shadowsocks/tls_direct.go b/protocol/shadowsocks/tls_direct.go
 new file mode 100644
-index 00000000..3120aa9f
+index 00000000..ef71f91c
 --- /dev/null
-+++ b/outbound/shadowsocks_tls_direct.go
-@@ -0,0 +1,230 @@
-+package outbound
++++ b/protocol/shadowsocks/tls_direct.go
+@@ -0,0 +1,228 @@
++package shadowsocks
 +
 +import (
 +	"bytes"
@@ -71,13 +71,11 @@ index 00000000..3120aa9f
 +	"time"
 +)
 +
-+const (
-+	tlsDirectMaxEncryptedPackets = 20
-+)
++const tlsDirectMaxEncryptedPackets = 20
 +
 +var tlsDirectMarker = []byte("\x00ss-rust-tls-direct-v1\xff")
 +
-+type shadowsocksTLSDirectConn struct {
++type tlsDirectConn struct {
 +	net.Conn
 +	rawConn net.Conn
 +
@@ -92,14 +90,14 @@ index 00000000..3120aa9f
 +	state       tlsDirectState
 +}
 +
-+func newShadowsocksTLSDirectConn(conn net.Conn, rawConn net.Conn) net.Conn {
-+	return &shadowsocksTLSDirectConn{
++func newTLSDirectConn(conn net.Conn, rawConn net.Conn) net.Conn {
++	return &tlsDirectConn{
 +		Conn:    conn,
 +		rawConn: rawConn,
 +	}
 +}
 +
-+func (c *shadowsocksTLSDirectConn) Read(p []byte) (int, error) {
++func (c *tlsDirectConn) Read(p []byte) (int, error) {
 +	c.readAccess.Lock()
 +	defer c.readAccess.Unlock()
 +
@@ -140,7 +138,7 @@ index 00000000..3120aa9f
 +	return n, err
 +}
 +
-+func (c *shadowsocksTLSDirectConn) Write(p []byte) (int, error) {
++func (c *tlsDirectConn) Write(p []byte) (int, error) {
 +	c.writeAccess.Lock()
 +	defer c.writeAccess.Unlock()
 +
@@ -162,39 +160,39 @@ index 00000000..3120aa9f
 +	return c.Conn.Write(p)
 +}
 +
-+func (c *shadowsocksTLSDirectConn) observe(data []byte) {
++func (c *tlsDirectConn) observe(data []byte) {
 +	c.stateAccess.Lock()
 +	defer c.stateAccess.Unlock()
 +	c.state.observe(data)
 +}
 +
-+func (c *shadowsocksTLSDirectConn) shouldSwitchToDirect(data []byte) bool {
++func (c *tlsDirectConn) shouldSwitchToDirect(data []byte) bool {
 +	c.stateAccess.Lock()
 +	defer c.stateAccess.Unlock()
 +	return c.state.shouldSwitchToDirect(data)
 +}
 +
-+func (c *shadowsocksTLSDirectConn) Close() error {
++func (c *tlsDirectConn) Close() error {
 +	return c.Conn.Close()
 +}
 +
-+func (c *shadowsocksTLSDirectConn) LocalAddr() net.Addr {
++func (c *tlsDirectConn) LocalAddr() net.Addr {
 +	return c.Conn.LocalAddr()
 +}
 +
-+func (c *shadowsocksTLSDirectConn) RemoteAddr() net.Addr {
++func (c *tlsDirectConn) RemoteAddr() net.Addr {
 +	return c.Conn.RemoteAddr()
 +}
 +
-+func (c *shadowsocksTLSDirectConn) SetDeadline(t time.Time) error {
++func (c *tlsDirectConn) SetDeadline(t time.Time) error {
 +	return c.Conn.SetDeadline(t)
 +}
 +
-+func (c *shadowsocksTLSDirectConn) SetReadDeadline(t time.Time) error {
++func (c *tlsDirectConn) SetReadDeadline(t time.Time) error {
 +	return c.Conn.SetReadDeadline(t)
 +}
 +
-+func (c *shadowsocksTLSDirectConn) SetWriteDeadline(t time.Time) error {
++func (c *tlsDirectConn) SetWriteDeadline(t time.Time) error {
 +	return c.Conn.SetWriteDeadline(t)
 +}
 +
@@ -288,6 +286,6 @@ index 00000000..3120aa9f
 +	return nil
 +}
 +
-+var _ net.Conn = (*shadowsocksTLSDirectConn)(nil)
-+var _ io.Reader = (*shadowsocksTLSDirectConn)(nil)
-+var _ io.Writer = (*shadowsocksTLSDirectConn)(nil)
++var _ net.Conn = (*tlsDirectConn)(nil)
++var _ io.Reader = (*tlsDirectConn)(nil)
++var _ io.Writer = (*tlsDirectConn)(nil)
