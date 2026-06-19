@@ -1,5 +1,6 @@
 package io.nekohasekai.sagernet.fmt.shadowsocks
 
+import android.util.Log
 import io.nekohasekai.sagernet.ktx.*
 import moe.matsuri.nb4a.SingBoxOptions
 import moe.matsuri.nb4a.utils.Util
@@ -129,14 +130,19 @@ fun JSONObject.parseShadowsocks(): ShadowsocksBean {
 }
 
 fun buildSingBoxOutboundShadowsocksBean(bean: ShadowsocksBean): SingBoxOptions.Outbound_ShadowsocksOptions {
+    val selectedServerPort = if (bean.experimentalTlsDirect) {
+        bean.experimentalTlsDirectPort?.takeIf { it > 0 } ?: bean.serverPort
+    } else {
+        bean.serverPort
+    }
+    Log.w(
+        "NekoTLSDirect",
+        "build shadowsocks outbound server=${bean.serverAddress} port=$selectedServerPort tlsDirect=${bean.experimentalTlsDirect} tlsDirectPort=${bean.experimentalTlsDirectPort}"
+    )
     return SingBoxOptions.Outbound_ShadowsocksOptions().apply {
         type = "shadowsocks"
         server = bean.serverAddress
-        server_port = if (bean.experimentalTlsDirect) {
-            bean.experimentalTlsDirectPort?.takeIf { it > 0 } ?: bean.serverPort
-        } else {
-            bean.serverPort
-        }
+        server_port = selectedServerPort
         password = bean.password
         method = bean.method
         if (bean.plugin.isNotBlank()) {

@@ -19,8 +19,8 @@ class ShadowsocksSettingsActivity : ProfileSettingsActivity<ShadowsocksBean>() {
     private val name = pbm.add(PreferenceBinding(Type.Text, "name"))
     private val serverAddress = pbm.add(PreferenceBinding(Type.Text, "serverAddress"))
     private val serverPort = pbm.add(PreferenceBinding(Type.TextToInt, "serverPort"))
-    private val experimentalTlsDirectPortBinding =
-        pbm.add(PreferenceBinding(Type.Text, "experimentalTlsDirectPort").apply { disable = true })
+    private val experimentalTlsDirectPort =
+        pbm.add(PreferenceBinding(Type.TextToInt, "experimentalTlsDirectPort"))
     private val password = pbm.add(PreferenceBinding(Type.Text, "password"))
     private val method = pbm.add(PreferenceBinding(Type.Text, "method"))
     private val pluginName =
@@ -36,10 +36,6 @@ class ShadowsocksSettingsActivity : ProfileSettingsActivity<ShadowsocksBean>() {
 
         DataStore.profileCacheStore.putString("pluginName", plugin.substringBefore(";"))
         DataStore.profileCacheStore.putString("pluginConfig", plugin.substringAfter(";"))
-        DataStore.profileCacheStore.putString(
-            "experimentalTlsDirectPort",
-            experimentalTlsDirectPort?.takeIf { it > 0 }?.toString() ?: ""
-        )
     }
 
     override fun ShadowsocksBean.serialize() {
@@ -48,8 +44,6 @@ class ShadowsocksSettingsActivity : ProfileSettingsActivity<ShadowsocksBean>() {
         val pn = pluginName.readStringFromCache()
         val pc = pluginConfig.readStringFromCache()
         plugin = if (pn.isNotBlank()) "$pn;$pc" else ""
-        experimentalTlsDirectPort =
-            experimentalTlsDirectPortBinding.readStringFromCache().toIntOrNull()?.takeIf { it > 0 }
     }
 
     override fun PreferenceFragmentCompat.createPreferences(
@@ -63,7 +57,7 @@ class ShadowsocksSettingsActivity : ProfileSettingsActivity<ShadowsocksBean>() {
             this as EditTextPreference
             setOnBindEditTextListener(EditTextPreferenceModifiers.Port)
         }
-        experimentalTlsDirectPortBinding.preference.apply {
+        experimentalTlsDirectPort.preference.apply {
             this as EditTextPreference
             setOnBindEditTextListener(EditTextPreferenceModifiers.Port)
         }
@@ -72,11 +66,10 @@ class ShadowsocksSettingsActivity : ProfileSettingsActivity<ShadowsocksBean>() {
             summaryProvider = PasswordSummaryProvider
         }
         experimentalTlsDirect.preference.setOnPreferenceChangeListener { _, newValue ->
-            experimentalTlsDirectPortBinding.preference.isEnabled = newValue as Boolean
+            experimentalTlsDirectPort.preference.isEnabled = newValue as Boolean
             true
         }
-        experimentalTlsDirectPortBinding.preference.isEnabled =
-            experimentalTlsDirect.readBoolFromCache()
+        experimentalTlsDirectPort.preference.isEnabled = experimentalTlsDirect.readBoolFromCache()
     }
 
 }

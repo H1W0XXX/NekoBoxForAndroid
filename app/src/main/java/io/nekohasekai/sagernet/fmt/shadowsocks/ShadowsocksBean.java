@@ -73,6 +73,9 @@ public class ShadowsocksBean extends AbstractBean {
         } else {
             experimentalTlsDirectPort = null;
         }
+        if (experimentalTlsDirectPort != null && experimentalTlsDirectPort <= 0) {
+            experimentalTlsDirectPort = null;
+        }
     }
 
     @NotNull
