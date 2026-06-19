@@ -51,6 +51,9 @@
         <SwitchPreference
             app:key="sUoT"
             app:title="UDP over TCP" />
+        <SwitchPreference
+            app:key="experimentalTlsDirect"
+            app:title="Experimental TLS Direct" />
     </PreferenceCategory>
 
 </PreferenceScreen>

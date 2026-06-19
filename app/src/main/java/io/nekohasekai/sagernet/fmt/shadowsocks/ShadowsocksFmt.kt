@@ -36,6 +36,7 @@ fun parseShadowsocks(url: String): ShadowsocksBean {
                 method = link.username
                 password = link.password
                 plugin = link.queryParameter("plugin") ?: ""
+                experimentalTlsDirect = link.queryParameter("experimental_tls_direct") == "1"
                 name = link.fragment
                 fixPluginName()
             }
@@ -49,6 +50,7 @@ fun parseShadowsocks(url: String): ShadowsocksBean {
             method = methodAndPswd.substringBefore(":")
             password = methodAndPswd.substringAfter(":")
             plugin = link.queryParameter("plugin") ?: ""
+            experimentalTlsDirect = link.queryParameter("experimental_tls_direct") == "1"
             name = link.fragment
             fixPluginName()
         }
@@ -84,6 +86,10 @@ fun ShadowsocksBean.toUri(): String {
         builder.addQueryParameter("plugin", plugin)
     }
 
+    if (experimentalTlsDirect) {
+        builder.addQueryParameter("experimental_tls_direct", "1")
+    }
+
     if (name.isNotBlank()) {
         builder.encodedFragment(name.urlSafe())
     }
@@ -99,6 +105,7 @@ fun JSONObject.parseShadowsocks(): ShadowsocksBean {
         password = getStr("password")
         method = getStr("method")
         name = optString("remarks", "")
+        experimentalTlsDirect = optBoolean("experimental_tls_direct", false)
 
         val pId = getStr("plugin")
         if (!pId.isNullOrBlank()) {
@@ -121,6 +128,9 @@ fun buildSingBoxOutboundShadowsocksBean(bean: ShadowsocksBean): SingBoxOptions.O
                 plugin = null
                 plugin_opts = null
             }
+        }
+        if (bean.experimentalTlsDirect) {
+            _hack_config_map["experimental_tls_direct"] = true
         }
     }
 }

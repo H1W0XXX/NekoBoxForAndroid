@@ -115,15 +115,25 @@ fun Project.setupAppCommon() {
     setupCommon()
 
     val lp = requireLocalProperties()
-    val keystorePwd = lp.getProperty("KEYSTORE_PASS") ?: System.getenv("KEYSTORE_PASS")
-    val alias = lp.getProperty("ALIAS_NAME") ?: System.getenv("ALIAS_NAME")
-    val pwd = lp.getProperty("ALIAS_PASS") ?: System.getenv("ALIAS_PASS")
+    val keystorePwd = lp.getProperty("KEYSTORE_PASS") ?: System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: System.getenv("KEYSTORE_PASS")
+    val alias = lp.getProperty("ALIAS_NAME") ?: System.getenv("ANDROID_KEY_ALIAS") ?: System.getenv("ALIAS_NAME")
+    val pwd = lp.getProperty("ALIAS_PASS") ?: System.getenv("ANDROID_KEY_PASSWORD") ?: System.getenv("ALIAS_PASS")
+    val keystoreBase64 = System.getenv("ANDROID_KEYSTORE_BASE64") ?: System.getenv("KEYSTORE_BASE64")
+    val keystoreFile = if (!keystoreBase64.isNullOrBlank()) {
+        rootProject.buildDir.resolve("generated/signing/release.keystore").apply {
+            parentFile.mkdirs()
+            writeBytes(Base64.getDecoder().decode(keystoreBase64))
+        }
+    } else {
+        val keystorePath = lp.getProperty("KEYSTORE_PATH") ?: System.getenv("KEYSTORE_PATH")
+        rootProject.file(keystorePath ?: "release.keystore")
+    }
 
     android.apply {
         if (keystorePwd != null) {
             signingConfigs {
                 create("release") {
-                    storeFile = rootProject.file("release.keystore")
+                    storeFile = keystoreFile
                     storePassword = keystorePwd
                     keyAlias = alias
                     keyPassword = pwd

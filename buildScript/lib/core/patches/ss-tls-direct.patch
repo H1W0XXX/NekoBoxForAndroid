@@ -1,0 +1,293 @@
+diff --git a/option/shadowsocks.go b/option/shadowsocks.go
+index 3dc96171..cfd92a96 100644
+--- a/option/shadowsocks.go
++++ b/option/shadowsocks.go
+@@ -23,11 +23,12 @@ type ShadowsocksDestination struct {
+ type ShadowsocksOutboundOptions struct {
+ 	DialerOptions
+ 	ServerOptions
+-	Method            string             `json:"method"`
+-	Password          string             `json:"password"`
+-	Plugin            string             `json:"plugin,omitempty"`
+-	PluginOptions     string             `json:"plugin_opts,omitempty"`
+-	Network           NetworkList        `json:"network,omitempty"`
+-	UDPOverTCPOptions *UDPOverTCPOptions `json:"udp_over_tcp,omitempty"`
+-	MultiplexOptions  *MultiplexOptions  `json:"multiplex,omitempty"`
++	Method                string             `json:"method"`
++	Password              string             `json:"password"`
++	Plugin                string             `json:"plugin,omitempty"`
++	PluginOptions         string             `json:"plugin_opts,omitempty"`
++	Network               NetworkList        `json:"network,omitempty"`
++	ExperimentalTLSDirect bool               `json:"experimental_tls_direct,omitempty"`
++	UDPOverTCPOptions     *UDPOverTCPOptions `json:"udp_over_tcp,omitempty"`
++	MultiplexOptions      *MultiplexOptions  `json:"multiplex,omitempty"`
+ }
+diff --git a/outbound/shadowsocks.go b/outbound/shadowsocks.go
+index 0741eb80..93f55866 100644
+--- a/outbound/shadowsocks.go
++++ b/outbound/shadowsocks.go
+@@ -29,6 +29,7 @@ type Shadowsocks struct {
+ 	method          shadowsocks.Method
+ 	serverAddr      M.Socksaddr
+ 	plugin          sip003.Plugin
++	tlsDirect       bool
+ 	uotClient       *uot.Client
+ 	multiplexDialer N.Dialer
+ }
+@@ -49,6 +50,7 @@ func NewShadowsocks(ctx context.Context, router adapter.Router, logger log.Conte
+ 		dialer:     dialer.New(router, options.DialerOptions),
+ 		method:     method,
+ 		serverAddr: options.ServerOptions.Build(),
++		tlsDirect:  options.ExperimentalTLSDirect,
+ 	}
+ 	if options.Plugin != "" {
+ 		outbound.plugin, err = sip003.CreatePlugin(options.Plugin, options.PluginOptions, router, outbound.dialer, outbound.serverAddr)
+@@ -151,7 +153,11 @@ func (h *shadowsocksDialer) DialContext(ctx context.Context, network string, des
+ 		if err != nil {
+ 			return nil, err
+ 		}
+-		return h.method.DialEarlyConn(outConn, destination), nil
++		conn := h.method.DialEarlyConn(outConn, destination)
++		if h.tlsDirect {
++			conn = newShadowsocksTLSDirectConn(conn, outConn)
++		}
++		return conn, nil
+ 	case N.NetworkUDP:
+ 		outConn, err := h.dialer.DialContext(ctx, N.NetworkUDP, h.serverAddr)
+ 		if err != nil {
+diff --git a/outbound/shadowsocks_tls_direct.go b/outbound/shadowsocks_tls_direct.go
+new file mode 100644
+index 00000000..3120aa9f
+--- /dev/null
++++ b/outbound/shadowsocks_tls_direct.go
+@@ -0,0 +1,230 @@
++package outbound
++
++import (
++	"bytes"
++	"io"
++	"net"
++	"sync"
++	"time"
++)
++
++const (
++	tlsDirectMaxEncryptedPackets = 20
++)
++
++var tlsDirectMarker = []byte("\x00ss-rust-tls-direct-v1\xff")
++
++type shadowsocksTLSDirectConn struct {
++	net.Conn
++	rawConn net.Conn
++
++	readAccess sync.Mutex
++	readPlain  bool
++	readBuffer []byte
++
++	writeAccess sync.Mutex
++	writePlain  bool
++
++	stateAccess sync.Mutex
++	state       tlsDirectState
++}
++
++func newShadowsocksTLSDirectConn(conn net.Conn, rawConn net.Conn) net.Conn {
++	return &shadowsocksTLSDirectConn{
++		Conn:    conn,
++		rawConn: rawConn,
++	}
++}
++
++func (c *shadowsocksTLSDirectConn) Read(p []byte) (int, error) {
++	c.readAccess.Lock()
++	defer c.readAccess.Unlock()
++
++	if len(p) == 0 {
++		return 0, nil
++	}
++
++	if len(c.readBuffer) > 0 {
++		n := copy(p, c.readBuffer)
++		c.readBuffer = c.readBuffer[n:]
++		return n, nil
++	}
++
++	if c.readPlain {
++		return c.rawConn.Read(p)
++	}
++
++	buffer := make([]byte, 16*1024)
++	n, err := c.Conn.Read(buffer)
++	if n > 0 {
++		data := buffer[:n]
++		if bytes.HasPrefix(data, tlsDirectMarker) {
++			payload := data[len(tlsDirectMarker):]
++			c.readPlain = true
++			n = copy(p, payload)
++			if n < len(payload) {
++				c.readBuffer = append(c.readBuffer[:0], payload[n:]...)
++			}
++			return n, nil
++		}
++		c.observe(data)
++		n = copy(p, data)
++		if n < len(data) {
++			c.readBuffer = append(c.readBuffer[:0], data[n:]...)
++		}
++		return n, nil
++	}
++	return n, err
++}
++
++func (c *shadowsocksTLSDirectConn) Write(p []byte) (int, error) {
++	c.writeAccess.Lock()
++	defer c.writeAccess.Unlock()
++
++	if c.writePlain {
++		return c.rawConn.Write(p)
++	}
++
++	if c.shouldSwitchToDirect(p) {
++		buffer := make([]byte, 0, len(tlsDirectMarker)+len(p))
++		buffer = append(buffer, tlsDirectMarker...)
++		buffer = append(buffer, p...)
++		if err := writeFull(c.Conn, buffer); err != nil {
++			return 0, err
++		}
++		c.writePlain = true
++		return len(p), nil
++	}
++
++	return c.Conn.Write(p)
++}
++
++func (c *shadowsocksTLSDirectConn) observe(data []byte) {
++	c.stateAccess.Lock()
++	defer c.stateAccess.Unlock()
++	c.state.observe(data)
++}
++
++func (c *shadowsocksTLSDirectConn) shouldSwitchToDirect(data []byte) bool {
++	c.stateAccess.Lock()
++	defer c.stateAccess.Unlock()
++	return c.state.shouldSwitchToDirect(data)
++}
++
++func (c *shadowsocksTLSDirectConn) Close() error {
++	return c.Conn.Close()
++}
++
++func (c *shadowsocksTLSDirectConn) LocalAddr() net.Addr {
++	return c.Conn.LocalAddr()
++}
++
++func (c *shadowsocksTLSDirectConn) RemoteAddr() net.Addr {
++	return c.Conn.RemoteAddr()
++}
++
++func (c *shadowsocksTLSDirectConn) SetDeadline(t time.Time) error {
++	return c.Conn.SetDeadline(t)
++}
++
++func (c *shadowsocksTLSDirectConn) SetReadDeadline(t time.Time) error {
++	return c.Conn.SetReadDeadline(t)
++}
++
++func (c *shadowsocksTLSDirectConn) SetWriteDeadline(t time.Time) error {
++	return c.Conn.SetWriteDeadline(t)
++}
++
++type tlsDirectState struct {
++	packetsSeen int
++	tlsSeen     bool
++	tls13Seen   bool
++}
++
++func (s *tlsDirectState) observe(data []byte) {
++	if len(data) == 0 {
++		return
++	}
++
++	s.packetsSeen++
++
++	if len(data) < 6 || data[1] != 0x03 {
++		return
++	}
++
++	switch data[0] {
++	case 0x16:
++		handshakeType := data[5]
++		if handshakeType == 0x01 {
++			s.tlsSeen = true
++		} else if handshakeType == 0x02 {
++			s.tlsSeen = true
++			if serverHelloHasTLS13SupportedVersions(data) {
++				s.tls13Seen = true
++			}
++		}
++	case 0x17:
++		if isTLSRecordVersion(data[1], data[2]) && s.tlsSeen && s.packetsSeen >= tlsDirectMaxEncryptedPackets {
++			return
++		}
++	}
++}
++
++func (s *tlsDirectState) shouldSwitchToDirect(data []byte) bool {
++	s.observe(data)
++	return s.tlsSeen &&
++		isCompleteTLSApplicationData(data) &&
++		(s.tls13Seen || s.packetsSeen >= tlsDirectMaxEncryptedPackets)
++}
++
++func isCompleteTLSApplicationData(data []byte) bool {
++	for len(data) > 0 {
++		if len(data) < 5 {
++			return false
++		}
++		if data[0] != 0x17 || !isTLSRecordVersion(data[1], data[2]) {
++			return false
++		}
++		recordLen := int(data[3])<<8 | int(data[4])
++		data = data[5:]
++		if len(data) < recordLen {
++			return false
++		}
++		data = data[recordLen:]
++	}
++	return true
++}
++
++func isTLSRecordVersion(major byte, minor byte) bool {
++	return major == 0x03 && minor >= 0x01 && minor <= 0x04
++}
++
++func serverHelloHasTLS13SupportedVersions(data []byte) bool {
++	if len(data) < 5 {
++		return false
++	}
++	recordLen := int(data[3])<<8 | int(data[4])
++	end := 5 + recordLen
++	if end > len(data) {
++		end = len(data)
++	}
++	return bytes.Contains(data[:end], []byte{0x00, 0x2b, 0x00, 0x02, 0x03, 0x04})
++}
++
++func writeFull(writer io.Writer, data []byte) error {
++	for len(data) > 0 {
++		n, err := writer.Write(data)
++		if err != nil {
++			return err
++		}
++		if n == 0 {
++			return io.ErrShortWrite
++		}
++		data = data[n:]
++	}
++	return nil
++}
++
++var _ net.Conn = (*shadowsocksTLSDirectConn)(nil)
++var _ io.Reader = (*shadowsocksTLSDirectConn)(nil)
++var _ io.Writer = (*shadowsocksTLSDirectConn)(nil)

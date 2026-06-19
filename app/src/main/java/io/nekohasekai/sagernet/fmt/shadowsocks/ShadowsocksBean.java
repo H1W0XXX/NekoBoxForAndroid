@@ -18,6 +18,7 @@ public class ShadowsocksBean extends AbstractBean {
     public String plugin;
 
     public Boolean sUoT;
+    public Boolean experimentalTlsDirect;
 
     @Override
     public void initializeDefaultValues() {
@@ -28,16 +29,18 @@ public class ShadowsocksBean extends AbstractBean {
         if (password == null) password = "";
         if (plugin == null) plugin = "";
         if (sUoT == null) sUoT = false;
+        if (experimentalTlsDirect == null) experimentalTlsDirect = false;
     }
 
     @Override
     public void serialize(ByteBufferOutput output) {
-        output.writeInt(2);
+        output.writeInt(3);
         super.serialize(output);
         output.writeString(method);
         output.writeString(password);
         output.writeString(plugin);
         output.writeBoolean(sUoT);
+        output.writeBoolean(experimentalTlsDirect);
     }
 
     @Override
@@ -47,7 +50,16 @@ public class ShadowsocksBean extends AbstractBean {
         method = input.readString();
         password = input.readString();
         plugin = input.readString();
-        sUoT = input.readBoolean();
+        if (version >= 2) {
+            sUoT = input.readBoolean();
+        } else {
+            sUoT = false;
+        }
+        if (version >= 3) {
+            experimentalTlsDirect = input.readBoolean();
+        } else {
+            experimentalTlsDirect = false;
+        }
     }
 
     @NotNull
