@@ -13,6 +13,10 @@ fun ShadowsocksBean.fixPluginName() {
 }
 
 fun parseShadowsocks(url: String): ShadowsocksBean {
+    fun parseTLSDirectPort(port: String?): Int? {
+        val value = port?.toIntOrNull() ?: return null
+        return if (value > 0) value else null
+    }
 
     if (url.substringBefore("#").contains("@")) {
         var link = url.replace("ss://", "https://").toHttpUrlOrNull() ?: error(
@@ -37,6 +41,9 @@ fun parseShadowsocks(url: String): ShadowsocksBean {
                 password = link.password
                 plugin = link.queryParameter("plugin") ?: ""
                 experimentalTlsDirect = link.queryParameter("experimental_tls_direct") == "1"
+                experimentalTlsDirectPort = parseTLSDirectPort(
+                    link.queryParameter("experimental_tls_direct_port")
+                )
                 name = link.fragment
                 fixPluginName()
             }
@@ -51,6 +58,9 @@ fun parseShadowsocks(url: String): ShadowsocksBean {
             password = methodAndPswd.substringAfter(":")
             plugin = link.queryParameter("plugin") ?: ""
             experimentalTlsDirect = link.queryParameter("experimental_tls_direct") == "1"
+            experimentalTlsDirectPort = parseTLSDirectPort(
+                link.queryParameter("experimental_tls_direct_port")
+            )
             name = link.fragment
             fixPluginName()
         }
@@ -88,6 +98,9 @@ fun ShadowsocksBean.toUri(): String {
 
     if (experimentalTlsDirect) {
         builder.addQueryParameter("experimental_tls_direct", "1")
+        experimentalTlsDirectPort?.takeIf { it > 0 }?.let {
+            builder.addQueryParameter("experimental_tls_direct_port", it.toString())
+        }
     }
 
     if (name.isNotBlank()) {
@@ -106,6 +119,7 @@ fun JSONObject.parseShadowsocks(): ShadowsocksBean {
         method = getStr("method")
         name = optString("remarks", "")
         experimentalTlsDirect = optBoolean("experimental_tls_direct", false)
+        experimentalTlsDirectPort = optInt("experimental_tls_direct_port").takeIf { it > 0 }
 
         val pId = getStr("plugin")
         if (!pId.isNullOrBlank()) {
@@ -118,7 +132,11 @@ fun buildSingBoxOutboundShadowsocksBean(bean: ShadowsocksBean): SingBoxOptions.O
     return SingBoxOptions.Outbound_ShadowsocksOptions().apply {
         type = "shadowsocks"
         server = bean.serverAddress
-        server_port = bean.serverPort
+        server_port = if (bean.experimentalTlsDirect) {
+            bean.experimentalTlsDirectPort?.takeIf { it > 0 } ?: bean.serverPort
+        } else {
+            bean.serverPort
+        }
         password = bean.password
         method = bean.method
         if (bean.plugin.isNotBlank()) {

@@ -54,6 +54,11 @@
         <SwitchPreference
             app:key="experimentalTlsDirect"
             app:title="Experimental TLS Direct" />
+        <EditTextPreference
+            app:icon="@drawable/ic_maps_directions_boat"
+            app:key="experimentalTlsDirectPort"
+            app:title="Experimental TLS Direct Port"
+            app:useSimpleSummaryProvider="true" />
     </PreferenceCategory>
 
 </PreferenceScreen>
