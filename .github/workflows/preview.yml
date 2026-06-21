@@ -1,5 +1,9 @@
 name: Preview Build
 on:
+  push:
+    branches:
+      - main
+      - codex/**
   workflow_dispatch:
     inputs:
 jobs:
