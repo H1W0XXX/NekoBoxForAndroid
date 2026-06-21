@@ -36,6 +36,11 @@ jobs:
           go-version: ^1.25
       - name: Native Build
         if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          LIBCORE_GOMOBILE_TARGET: android/arm64
+          LIBCORE_GOARM64: v9.2,crypto
+          LIBCORE_CGO_CFLAGS: -O3 -march=armv9-a+crypto
+          LIBCORE_CGO_CXXFLAGS: -O3 -march=armv9-a+crypto
         run: ./run lib core
   build:
     name: Build OSS APK
@@ -63,6 +68,7 @@ jobs:
       - name: Gradle Build
         env:
           BUILD_PLUGIN: none
+          NB_TARGET_ABIS: arm64-v8a
           LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -133,6 +139,7 @@ jobs:
           git submodule update --init 'app/*'
       - name: Gradle Build
         env:
+          NB_TARGET_ABIS: arm64-v8a
           LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}

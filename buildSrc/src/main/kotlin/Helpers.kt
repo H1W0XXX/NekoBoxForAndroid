@@ -15,6 +15,16 @@ private val Project.android get() = extensions.getByName<ApplicationExtension>("
 private lateinit var metadata: Properties
 private lateinit var localProperties: Properties
 
+private fun targetAbis(): List<String> {
+    val configured = System.getenv("NB_TARGET_ABIS")
+        ?.split(',')
+        ?.map(String::trim)
+        ?.filter(String::isNotEmpty)
+        .orEmpty()
+    if (configured.isNotEmpty()) return configured
+    return listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+}
+
 fun Project.requireMetadata(): Properties {
     if (!::metadata.isInitialized) {
         metadata = Properties().apply {
@@ -180,10 +190,7 @@ fun Project.setupApp() {
             reset()
             isEnable = true
             isUniversalApk = false
-            include("armeabi-v7a")
-            include("arm64-v8a")
-            include("x86")
-            include("x86_64")
+            include(*targetAbis().toTypedArray())
         }
 
         flavorDimensions += "vendor"
