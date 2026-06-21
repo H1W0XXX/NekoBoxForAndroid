@@ -2,7 +2,9 @@
 
 set -euo pipefail
 
-source ./env_java.sh || true
+if [ -f ./env_java.sh ]; then
+  source ./env_java.sh
+fi
 source ../buildScript/init/env_ndk.sh
 
 BUILD=".build"
@@ -12,7 +14,7 @@ rm -rf $BUILD/android \
   $BUILD/javac-output \
   $BUILD/src
 
-if [ -z "$GOPATH" ]; then
+if [ -z "${GOPATH:-}" ]; then
   GOPATH=$(go env GOPATH)
 fi
 
