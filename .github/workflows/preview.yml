@@ -32,6 +32,7 @@ jobs:
       - name: Native Build
         if: steps.cache.outputs.cache-hit != 'true'
         env:
+          GOTOOLCHAIN: local
           LIBCORE_GOMOBILE_TARGET: android/arm64
           LIBCORE_GOARM64: v9.2,crypto
           LIBCORE_CGO_CFLAGS: -O3 -march=armv9-a+crypto
