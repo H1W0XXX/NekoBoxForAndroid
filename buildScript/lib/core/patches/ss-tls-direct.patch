@@ -1,67 +1,67 @@
 diff --git a/option/shadowsocks.go b/option/shadowsocks.go
-index 7cb656f3..4dfaf907 100644
+index 3dc96171..cfd92a96 100644
 --- a/option/shadowsocks.go
 +++ b/option/shadowsocks.go
-@@ -25,11 +25,12 @@ type ShadowsocksDestination struct {
+@@ -23,11 +23,12 @@ type ShadowsocksDestination struct {
  type ShadowsocksOutboundOptions struct {
  	DialerOptions
  	ServerOptions
--	Method        string                    `json:"method"`
--	Password      string                    `json:"password"`
--	Plugin        string                    `json:"plugin,omitempty"`
--	PluginOptions string                    `json:"plugin_opts,omitempty"`
--	Network       NetworkList               `json:"network,omitempty"`
--	UDPOverTCP    *UDPOverTCPOptions        `json:"udp_over_tcp,omitempty"`
--	Multiplex     *OutboundMultiplexOptions `json:"multiplex,omitempty"`
-+	Method                string                    `json:"method"`
-+	Password              string                    `json:"password"`
-+	Plugin                string                    `json:"plugin,omitempty"`
-+	PluginOptions         string                    `json:"plugin_opts,omitempty"`
-+	Network               NetworkList               `json:"network,omitempty"`
-+	ExperimentalTLSDirect bool                      `json:"experimental_tls_direct,omitempty"`
-+	UDPOverTCP            *UDPOverTCPOptions        `json:"udp_over_tcp,omitempty"`
-+	Multiplex             *OutboundMultiplexOptions `json:"multiplex,omitempty"`
+-	Method            string             `json:"method"`
+-	Password          string             `json:"password"`
+-	Plugin            string             `json:"plugin,omitempty"`
+-	PluginOptions     string             `json:"plugin_opts,omitempty"`
+-	Network           NetworkList        `json:"network,omitempty"`
+-	UDPOverTCPOptions *UDPOverTCPOptions `json:"udp_over_tcp,omitempty"`
+-	MultiplexOptions  *MultiplexOptions  `json:"multiplex,omitempty"`
++	Method                string             `json:"method"`
++	Password              string             `json:"password"`
++	Plugin                string             `json:"plugin,omitempty"`
++	PluginOptions         string             `json:"plugin_opts,omitempty"`
++	Network               NetworkList        `json:"network,omitempty"`
++	ExperimentalTLSDirect bool               `json:"experimental_tls_direct,omitempty"`
++	UDPOverTCPOptions     *UDPOverTCPOptions `json:"udp_over_tcp,omitempty"`
++	MultiplexOptions      *MultiplexOptions  `json:"multiplex,omitempty"`
  }
-diff --git a/protocol/shadowsocks/outbound.go b/protocol/shadowsocks/outbound.go
-index 9b9d9252..2fa663f1 100644
---- a/protocol/shadowsocks/outbound.go
-+++ b/protocol/shadowsocks/outbound.go
-@@ -33,6 +33,7 @@ type Outbound struct {
+diff --git a/outbound/shadowsocks.go b/outbound/shadowsocks.go
+index 0741eb80..93f55866 100644
+--- a/outbound/shadowsocks.go
++++ b/outbound/shadowsocks.go
+@@ -29,6 +29,7 @@ type Shadowsocks struct {
  	method          shadowsocks.Method
  	serverAddr      M.Socksaddr
  	plugin          sip003.Plugin
 +	tlsDirect       bool
  	uotClient       *uot.Client
- 	multiplexDialer *mux.Client
+ 	multiplexDialer N.Dialer
  }
-@@ -54,6 +55,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
- 		dialer:     outboundDialer,
+@@ -49,6 +50,7 @@ func NewShadowsocks(ctx context.Context, router adapter.Router, logger log.Conte
+ 		dialer:     dialer.New(router, options.DialerOptions),
  		method:     method,
  		serverAddr: options.ServerOptions.Build(),
 +		tlsDirect:  options.ExperimentalTLSDirect,
  	}
  	if options.Plugin != "" {
- 		outbound.plugin, err = sip003.CreatePlugin(ctx, options.Plugin, options.PluginOptions, router, outbound.dialer, outbound.serverAddr)
-@@ -154,7 +156,11 @@ func (h *shadowsocksDialer) DialContext(ctx context.Context, network string, des
+ 		outbound.plugin, err = sip003.CreatePlugin(options.Plugin, options.PluginOptions, router, outbound.dialer, outbound.serverAddr)
+@@ -151,7 +153,11 @@ func (h *shadowsocksDialer) DialContext(ctx context.Context, network string, des
  		if err != nil {
  			return nil, err
  		}
 -		return h.method.DialEarlyConn(outConn, destination), nil
 +		conn := h.method.DialEarlyConn(outConn, destination)
 +		if h.tlsDirect {
-+			conn = newTLSDirectConn(conn, outConn)
++			conn = newShadowsocksTLSDirectConn(conn, outConn)
 +		}
 +		return conn, nil
  	case N.NetworkUDP:
  		outConn, err := h.dialer.DialContext(ctx, N.NetworkUDP, h.serverAddr)
  		if err != nil {
-diff --git a/protocol/shadowsocks/tls_direct.go b/protocol/shadowsocks/tls_direct.go
+	diff --git a/outbound/shadowsocks_tls_direct.go b/outbound/shadowsocks_tls_direct.go
 new file mode 100644
-index 00000000..ef71f91c
+index 00000000..ed2077f6
 --- /dev/null
-+++ b/protocol/shadowsocks/tls_direct.go
-@@ -0,0 +1,228 @@
-+package shadowsocks
++++ b/outbound/shadowsocks_tls_direct.go
+@@ -0,0 +1,375 @@
++package outbound
 +
 +import (
 +	"bytes"
@@ -71,11 +71,15 @@ index 00000000..ef71f91c
 +	"time"
 +)
 +
-+const tlsDirectMaxEncryptedPackets = 20
++const (
++	tlsDirectMaxObservationPackets  = 32
++	tlsDirectMaxRecordLen           = 0x4000 + 0x0800
++	tlsDirectServerHelloScanTailLen = 8
++)
 +
 +var tlsDirectMarker = []byte("\x00ss-rust-tls-direct-v1\xff")
 +
-+type tlsDirectConn struct {
++type shadowsocksTLSDirectConn struct {
 +	net.Conn
 +	rawConn net.Conn
 +
@@ -90,14 +94,14 @@ index 00000000..ef71f91c
 +	state       tlsDirectState
 +}
 +
-+func newTLSDirectConn(conn net.Conn, rawConn net.Conn) net.Conn {
-+	return &tlsDirectConn{
++func newShadowsocksTLSDirectConn(conn net.Conn, rawConn net.Conn) net.Conn {
++	return &shadowsocksTLSDirectConn{
 +		Conn:    conn,
 +		rawConn: rawConn,
 +	}
 +}
 +
-+func (c *tlsDirectConn) Read(p []byte) (int, error) {
++func (c *shadowsocksTLSDirectConn) Read(p []byte) (int, error) {
 +	c.readAccess.Lock()
 +	defer c.readAccess.Unlock()
 +
@@ -138,7 +142,7 @@ index 00000000..ef71f91c
 +	return n, err
 +}
 +
-+func (c *tlsDirectConn) Write(p []byte) (int, error) {
++func (c *shadowsocksTLSDirectConn) Write(p []byte) (int, error) {
 +	c.writeAccess.Lock()
 +	defer c.writeAccess.Unlock()
 +
@@ -160,46 +164,65 @@ index 00000000..ef71f91c
 +	return c.Conn.Write(p)
 +}
 +
-+func (c *tlsDirectConn) observe(data []byte) {
++func (c *shadowsocksTLSDirectConn) observe(data []byte) {
 +	c.stateAccess.Lock()
 +	defer c.stateAccess.Unlock()
 +	c.state.observe(data)
 +}
 +
-+func (c *tlsDirectConn) shouldSwitchToDirect(data []byte) bool {
++func (c *shadowsocksTLSDirectConn) shouldSwitchToDirect(data []byte) bool {
 +	c.stateAccess.Lock()
 +	defer c.stateAccess.Unlock()
 +	return c.state.shouldSwitchToDirect(data)
 +}
 +
-+func (c *tlsDirectConn) Close() error {
++func (c *shadowsocksTLSDirectConn) Close() error {
 +	return c.Conn.Close()
 +}
 +
-+func (c *tlsDirectConn) LocalAddr() net.Addr {
++func (c *shadowsocksTLSDirectConn) LocalAddr() net.Addr {
 +	return c.Conn.LocalAddr()
 +}
 +
-+func (c *tlsDirectConn) RemoteAddr() net.Addr {
++func (c *shadowsocksTLSDirectConn) RemoteAddr() net.Addr {
 +	return c.Conn.RemoteAddr()
 +}
 +
-+func (c *tlsDirectConn) SetDeadline(t time.Time) error {
++func (c *shadowsocksTLSDirectConn) SetDeadline(t time.Time) error {
 +	return c.Conn.SetDeadline(t)
 +}
 +
-+func (c *tlsDirectConn) SetReadDeadline(t time.Time) error {
++func (c *shadowsocksTLSDirectConn) SetReadDeadline(t time.Time) error {
 +	return c.Conn.SetReadDeadline(t)
 +}
 +
-+func (c *tlsDirectConn) SetWriteDeadline(t time.Time) error {
++func (c *shadowsocksTLSDirectConn) SetWriteDeadline(t time.Time) error {
 +	return c.Conn.SetWriteDeadline(t)
 +}
 +
 +type tlsDirectState struct {
-+	packetsSeen int
-+	tlsSeen     bool
-+	tls13Seen   bool
++	initialized               bool
++	packetsSeen               int
++	packetsLeftToInspect      int
++	tlsSeen                   bool
++	handshakeSeen             bool
++	clientHelloSeen           bool
++	serverHelloSeen           bool
++	tls12OrAbove              bool
++	tls13Seen                 bool
++	handshakeConfirmed        bool
++	invalidTLS                bool
++	switched                  bool
++	remainingServerHelloBytes int
++	serverHelloScanTail       []byte
++}
++
++func (s *tlsDirectState) ensureInitialized() {
++	if s.initialized {
++		return
++	}
++	s.initialized = true
++	s.packetsLeftToInspect = tlsDirectMaxObservationPackets
 +}
 +
 +func (s *tlsDirectState) observe(data []byte) {
@@ -207,51 +230,165 @@ index 00000000..ef71f91c
 +		return
 +	}
 +
++	s.ensureInitialized()
 +	s.packetsSeen++
++	if s.packetsLeftToInspect > 0 {
++		s.packetsLeftToInspect--
++	}
 +
-+	if len(data) < 6 || data[1] != 0x03 {
++	if s.invalidTLS || s.switched {
 +		return
 +	}
 +
-+	switch data[0] {
-+	case 0x16:
-+		handshakeType := data[5]
-+		if handshakeType == 0x01 {
-+			s.tlsSeen = true
-+		} else if handshakeType == 0x02 {
-+			s.tlsSeen = true
-+			if serverHelloHasTLS13SupportedVersions(data) {
-+				s.tls13Seen = true
-+			}
++	for pos := 0; pos < len(data) && s.shouldContinueObserving(); {
++		if s.remainingServerHelloBytes > 0 {
++			consumed := s.consumeServerHelloBytes(data[pos:])
++			pos += consumed
++			continue
 +		}
-+	case 0x17:
-+		if isTLSRecordVersion(data[1], data[2]) && s.tlsSeen && s.packetsSeen >= tlsDirectMaxEncryptedPackets {
-+			return
++
++		if len(data)-pos < 5 {
++			break
++		}
++
++		recordType := data[pos]
++		major := data[pos+1]
++		minor := data[pos+2]
++		if !isTLSRecordVersion(major, minor) {
++			break
++		}
++
++		recordLen := int(data[pos+3])<<8 | int(data[pos+4])
++		if recordLen > tlsDirectMaxRecordLen {
++			s.invalidTLS = true
++			break
++		}
++
++		totalLen := 5 + recordLen
++		available := len(data) - pos
++		if available > totalLen {
++			available = totalLen
++		}
++		record := data[pos : pos+available]
++		s.processRecord(recordType, minor, record, totalLen, available == totalLen)
++		pos += available
++
++		if available < totalLen {
++			break
 +		}
 +	}
 +}
 +
 +func (s *tlsDirectState) shouldSwitchToDirect(data []byte) bool {
 +	s.observe(data)
-+	return s.tlsSeen &&
-+		isCompleteTLSApplicationData(data) &&
-+		(s.tls13Seen || s.packetsSeen >= tlsDirectMaxEncryptedPackets)
++	completeTLS := isCompleteTLSApplicationData(data)
++	directReady := s.handshakeConfirmed &&
++		!s.invalidTLS &&
++		s.serverHelloSeen &&
++		(s.tls13Seen || s.tls12OrAbove)
++	decision := !s.switched && directReady && completeTLS
++	if decision {
++		s.switched = true
++	}
++	return decision
++}
++
++func (s *tlsDirectState) shouldContinueObserving() bool {
++	return !s.handshakeConfirmed &&
++		!s.invalidTLS &&
++		(s.remainingServerHelloBytes > 0 || s.packetsLeftToInspect > 0)
++}
++
++func (s *tlsDirectState) processRecord(recordType byte, minor byte, record []byte, totalLen int, isCompleteRecord bool) {
++	s.tlsSeen = true
++
++	if recordType != 0x16 {
++		return
++	}
++
++	s.handshakeSeen = true
++	s.tls12OrAbove = minor >= 0x03
++
++	if len(record) < 6 {
++		return
++	}
++
++	handshakeType := record[5]
++	switch handshakeType {
++	case 0x01:
++		s.clientHelloSeen = true
++	case 0x02:
++		s.serverHelloSeen = true
++		s.tls12OrAbove = minor >= 0x03
++		s.remainingServerHelloBytes = totalLen
++		s.serverHelloScanTail = s.serverHelloScanTail[:0]
++		consumed := s.consumeServerHelloBytes(record)
++		if consumed < len(record) || !isCompleteRecord {
++			return
++		}
++	}
++}
++
++func (s *tlsDirectState) consumeServerHelloBytes(data []byte) int {
++	if s.remainingServerHelloBytes == 0 || len(data) == 0 {
++		return 0
++	}
++
++	consume := s.remainingServerHelloBytes
++	if consume > len(data) {
++		consume = len(data)
++	}
++	slice := data[:consume]
++	s.scanServerHelloBytes(slice)
++	s.remainingServerHelloBytes -= consume
++	if s.remainingServerHelloBytes == 0 {
++		s.handshakeConfirmed = s.serverHelloSeen && s.tlsSeen
++		s.serverHelloScanTail = s.serverHelloScanTail[:0]
++	}
++	return consume
++}
++
++func (s *tlsDirectState) scanServerHelloBytes(data []byte) {
++	if len(data) == 0 {
++		return
++	}
++
++	if s.tls13Seen {
++		s.updateServerHelloScanTail(data)
++		return
++	}
++
++	combined := make([]byte, 0, len(s.serverHelloScanTail)+len(data))
++	combined = append(combined, s.serverHelloScanTail...)
++	combined = append(combined, data...)
++	if tls13SupportedVersionsSeen(combined) {
++		s.tls13Seen = true
++	}
++	s.updateServerHelloScanTail(combined)
++}
++
++func (s *tlsDirectState) updateServerHelloScanTail(data []byte) {
++	keep := len(data)
++	if keep > tlsDirectServerHelloScanTailLen {
++		keep = tlsDirectServerHelloScanTailLen
++	}
++	s.serverHelloScanTail = append(s.serverHelloScanTail[:0], data[len(data)-keep:]...)
 +}
 +
 +func isCompleteTLSApplicationData(data []byte) bool {
-+	for len(data) > 0 {
-+		if len(data) < 5 {
++	for pos := 0; pos < len(data); {
++		if len(data)-pos < 5 {
 +			return false
 +		}
-+		if data[0] != 0x17 || !isTLSRecordVersion(data[1], data[2]) {
++		if data[pos] != 0x17 || !isTLSRecordVersion(data[pos+1], data[pos+2]) {
 +			return false
 +		}
-+		recordLen := int(data[3])<<8 | int(data[4])
-+		data = data[5:]
-+		if len(data) < recordLen {
++		recordLen := int(data[pos+3])<<8 | int(data[pos+4])
++		pos += 5
++		if len(data)-pos < recordLen {
 +			return false
 +		}
-+		data = data[recordLen:]
++		pos += recordLen
 +	}
 +	return true
 +}
@@ -260,16 +397,26 @@ index 00000000..ef71f91c
 +	return major == 0x03 && minor >= 0x01 && minor <= 0x04
 +}
 +
-+func serverHelloHasTLS13SupportedVersions(data []byte) bool {
-+	if len(data) < 5 {
-+		return false
++func tls13SupportedVersionsSeen(data []byte) bool {
++	for pos := 0; pos+4 <= len(data); {
++		if data[pos] == 0x00 && data[pos+1] == 0x2b {
++			extLen := int(data[pos+2])<<8 | int(data[pos+3])
++			extStart := pos + 4
++			extEnd := extStart + extLen
++			if extEnd > len(data) {
++				extEnd = len(data)
++			}
++			for scan := extStart; scan+2 <= extEnd; scan++ {
++				if data[scan] == 0x03 && data[scan+1] == 0x04 {
++					return true
++				}
++			}
++			pos = extEnd
++		} else {
++			pos++
++		}
 +	}
-+	recordLen := int(data[3])<<8 | int(data[4])
-+	end := 5 + recordLen
-+	if end > len(data) {
-+		end = len(data)
-+	}
-+	return bytes.Contains(data[:end], []byte{0x00, 0x2b, 0x00, 0x02, 0x03, 0x04})
++	return false
 +}
 +
 +func writeFull(writer io.Writer, data []byte) error {
@@ -286,6 +433,6 @@ index 00000000..ef71f91c
 +	return nil
 +}
 +
-+var _ net.Conn = (*tlsDirectConn)(nil)
-+var _ io.Reader = (*tlsDirectConn)(nil)
-+var _ io.Writer = (*tlsDirectConn)(nil)
++var _ net.Conn = (*shadowsocksTLSDirectConn)(nil)
++var _ io.Reader = (*shadowsocksTLSDirectConn)(nil)
++var _ io.Writer = (*shadowsocksTLSDirectConn)(nil)
