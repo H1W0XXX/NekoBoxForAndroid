@@ -7,6 +7,8 @@ if [ -z "$GOPATH" ]; then
     GOPATH=$(go env GOPATH)
 fi
 
+source ../buildScript/lib/core/get_source_env.sh
+
 # Install gomobile and gobind from the selected fork revision.
 # Do not run `gomobile init` here because Matsuri's gomobile still forces
 # `gobind@latest`, which upgrades beyond the pinned Go toolchain in CI.
