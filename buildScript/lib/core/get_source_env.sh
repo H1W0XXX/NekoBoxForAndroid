@@ -1,5 +1,5 @@
 export SING_BOX_REPO="https://github.com/H1W0XXX/sing-box.git"
 export SING_BOX_APPLY_PATCH="0"
-export COMMIT_SING_BOX="251454c711f398426f337794bf679ca9eb8d6950"
+export COMMIT_SING_BOX="5dc40a8b53edc77337aa75416bf1ace3d79c57a0"
 export COMMIT_LIBNEKO="1c47a3af71990a7b2192e03292b4d246c308ef0b"
 export GOMOBILE_REF="origin/master2"
