@@ -5,6 +5,7 @@ import android.annotation.SuppressLint
 import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Network
 import android.net.ProxyInfo
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -31,11 +32,11 @@ class VpnService : BaseVpnService(),
 
     }
 
-    var conn: ParcelFileDescriptor? = null
+    @Volatile
+    private var conn: ParcelFileDescriptor? = null
+    private val connectionLock = Any()
 
     private var metered = false
-
-    override var upstreamInterfaceName: String? = null
 
     override suspend fun startProcesses() {
         DataStore.vpnService = this
@@ -51,10 +52,18 @@ class VpnService : BaseVpnService(),
     }
 
     @Suppress("EXPERIMENTAL_API_USAGE")
-    override fun killProcesses() {
-        conn?.close()
-        conn = null
+    override suspend fun killProcesses() {
+        closeVpn()
         super.killProcesses()
+    }
+
+    private fun closeVpn() {
+        val connection = synchronized(connectionLock) {
+            val current = conn
+            conn = null
+            current
+        }
+        runCatching { connection?.close() }.onFailure(Logs::w)
     }
 
     override fun onBind(intent: Intent) = when (intent.action) {
@@ -123,7 +132,7 @@ class VpnService : BaseVpnService(),
             }
         }
 
-        updateUnderlyingNetwork(builder)
+        configureUnderlyingNetwork(builder)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(metered)
 
         // app route
@@ -194,16 +203,46 @@ class VpnService : BaseVpnService(),
 
         metered = DataStore.meteredNetwork
         if (Build.VERSION.SDK_INT >= 29) builder.setMetered(metered)
-        conn = builder.establish() ?: throw NullConnectionException()
+        closeVpn()
+        val connection = synchronized(connectionLock) {
+            if (DataStore.vpnService !== this ||
+                data.state == BaseService.State.Stopping ||
+                data.state == BaseService.State.Stopped
+            ) {
+                throw IllegalStateException("VpnService is stopping")
+            }
+            val established = builder.establish() ?: throw NullConnectionException()
+            if (DataStore.vpnService !== this ||
+                data.state == BaseService.State.Stopping ||
+                data.state == BaseService.State.Stopped
+            ) {
+                established.close()
+                throw IllegalStateException("VpnService stopped while establishing VPN")
+            }
+            conn = established
+            established
+        }
 
-        return conn!!.fd
+        return connection.fd
     }
 
-    fun updateUnderlyingNetwork(builder: Builder? = null) {
+    private fun configureUnderlyingNetwork(builder: Builder) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
             SagerNet.underlyingNetwork?.let {
-                builder?.setUnderlyingNetworks(arrayOf(SagerNet.underlyingNetwork))
-                    ?: setUnderlyingNetworks(arrayOf(SagerNet.underlyingNetwork))
+                builder.setUnderlyingNetworks(arrayOf(it))
+            }
+        }
+    }
+
+    fun updateUnderlyingNetwork(network: Network?) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+            synchronized(connectionLock) {
+                if (conn == null) return
+                val networks: Array<Network> =
+                    if (network == null) emptyArray() else arrayOf(network)
+                if (!setUnderlyingNetworks(networks)) {
+                    Logs.w("Failed to update VPN underlying network: $network")
+                }
             }
         }
     }
@@ -212,6 +251,7 @@ class VpnService : BaseVpnService(),
 
     override fun onDestroy() {
         DataStore.vpnService = null
+        closeVpn()
         super.onDestroy()
         data.binder.close()
     }

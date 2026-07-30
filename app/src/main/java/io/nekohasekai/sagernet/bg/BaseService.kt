@@ -221,15 +221,14 @@ class BaseService {
             else startService(Intent(this, javaClass))
         }
 
-        fun killProcesses() {
+        suspend fun killProcesses() {
             data.proxy?.close()
             wakeLock?.apply {
                 release()
                 wakeLock = null
             }
-            runOnDefaultDispatcher {
-                DefaultNetworkListener.stop(this)
-            }
+            DefaultNetworkListener.stop(this)
+            SagerNet.underlyingNetwork = null
         }
 
         fun stopRunner(restart: Boolean = false, msg: String? = null) {
@@ -269,24 +268,15 @@ class BaseService {
             // TODO NEW save app stats?
         }
 
-        // networks
-        var upstreamInterfaceName: String?
-
         suspend fun preInit() {
-            DefaultNetworkListener.start(this) {
-                SagerNet.connectivity.getLinkProperties(it)?.also { link ->
-                    SagerNet.underlyingNetwork = it
-                    DataStore.vpnService?.updateUnderlyingNetwork()
-                    //
-                    val oldName = upstreamInterfaceName
-                    if (oldName != link.interfaceName) {
-                        upstreamInterfaceName = link.interfaceName
-                    }
-                    if (oldName != null && upstreamInterfaceName != null && oldName != upstreamInterfaceName) {
-                        Logs.d("Network changed: $oldName -> $upstreamInterfaceName")
-                        if (DataStore.networkChangeResetConnections) {
-                            Libcore.resetAllConnections(true)
-                        }
+            DefaultNetworkListener.start(this) { network ->
+                val oldNetwork = SagerNet.underlyingNetwork
+                if (oldNetwork != network) {
+                    SagerNet.underlyingNetwork = network
+                    DataStore.vpnService?.updateUnderlyingNetwork(network)
+                    Logs.d("Underlying network changed: $oldNetwork -> $network")
+                    if (oldNetwork != null && DataStore.networkChangeResetConnections) {
+                        Libcore.resetAllConnections(true)
                     }
                 }
             }
@@ -356,7 +346,7 @@ class BaseService {
             }
 
             data.changeState(State.Connecting)
-            runOnMainDispatcher {
+            val connectingJob = data.binder.launch(start = CoroutineStart.LAZY) {
                 try {
                     data.notification = createNotification(ServiceNotification.genTitle(profile))
 
@@ -396,6 +386,8 @@ class BaseService {
                     data.connectingJob = null
                 }
             }
+            data.connectingJob = connectingJob
+            connectingJob.start()
             return Service.START_NOT_STICKY
         }
     }

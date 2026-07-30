@@ -13,67 +13,87 @@ import io.nekohasekai.sagernet.ktx.Logs
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.actor
-import kotlinx.coroutines.runBlocking
 import java.net.UnknownHostException
 
 object DefaultNetworkListener {
     private sealed class NetworkMessage {
-        class Start(val key: Any, val listener: (Network?) -> Unit) : NetworkMessage()
+        class Start(val key: Any, val listener: (Network?) -> Unit) : NetworkMessage() {
+            val response = CompletableDeferred<Unit>()
+        }
+
         class Get : NetworkMessage() {
             val response = CompletableDeferred<Network>()
         }
 
-        class Stop(val key: Any) : NetworkMessage()
+        class Stop(val key: Any) : NetworkMessage() {
+            val response = CompletableDeferred<Unit>()
+        }
 
         class Put(val network: Network) : NetworkMessage()
-        class Update(val network: Network) : NetworkMessage()
         class Lost(val network: Network) : NetworkMessage()
     }
 
-    private val networkActor = GlobalScope.actor<NetworkMessage>(Dispatchers.Unconfined) {
+    private val networkActor = GlobalScope.actor<NetworkMessage>(
+        Dispatchers.Default,
+        capacity = Channel.UNLIMITED,
+    ) {
         val listeners = mutableMapOf<Any, (Network?) -> Unit>()
         var network: Network? = null
         val pendingRequests = arrayListOf<NetworkMessage.Get>()
+
+        fun notifyListener(listener: (Network?) -> Unit, value: Network?) {
+            runCatching { listener(value) }.onFailure(Logs::w)
+        }
+
+        fun notifyListeners(value: Network?) {
+            listeners.values.toList().forEach { notifyListener(it, value) }
+        }
+
         for (message in channel) when (message) {
             is NetworkMessage.Start -> {
-                if (listeners.isEmpty()) register()
+                val shouldRegister = listeners.isEmpty()
                 listeners[message.key] = message.listener
-                if (network != null) message.listener(network)
+                if (shouldRegister) register()
+                if (network != null) notifyListener(message.listener, network)
+                message.response.complete(Unit)
             }
+
             is NetworkMessage.Get -> {
                 check(listeners.isNotEmpty()) { "Getting network without any listeners is not supported" }
                 if (network == null) pendingRequests += message else message.response.complete(
                     network
                 )
             }
-            is NetworkMessage.Stop -> if (listeners.isNotEmpty() && // was not empty
-                listeners.remove(message.key) != null && listeners.isEmpty()
-            ) {
-                network = null
-                unregister()
+
+            is NetworkMessage.Stop -> {
+                if (listeners.remove(message.key) != null && listeners.isEmpty()) {
+                    network = null
+                    unregister()
+                }
+                message.response.complete(Unit)
             }
 
             is NetworkMessage.Put -> {
                 network = message.network
                 pendingRequests.forEach { it.response.complete(message.network) }
                 pendingRequests.clear()
-                listeners.values.forEach { it(network) }
+                notifyListeners(network)
             }
-            is NetworkMessage.Update -> if (network == message.network) listeners.values.forEach {
-                it(
-                    network
-                )
-            }
+
             is NetworkMessage.Lost -> if (network == message.network) {
                 network = null
-                listeners.values.forEach { it(null) }
+                notifyListeners(null)
             }
         }
     }
 
     suspend fun start(key: Any, listener: (Network?) -> Unit) =
-        networkActor.send(NetworkMessage.Start(key, listener))
+        NetworkMessage.Start(key, listener).run {
+            networkActor.send(this)
+            response.await()
+        }
 
     suspend fun get() = if (fallback) @TargetApi(23) {
         SagerNet.connectivity.activeNetwork
@@ -83,24 +103,27 @@ object DefaultNetworkListener {
         response.await()
     }
 
-    suspend fun stop(key: Any) = networkActor.send(NetworkMessage.Stop(key))
+    suspend fun stop(key: Any) = NetworkMessage.Stop(key).run {
+        networkActor.send(this)
+        response.await()
+    }
 
     // NB: this runs in ConnectivityThread, and this behavior cannot be changed until API 26
     private object Callback : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) =
-            runBlocking { networkActor.send(NetworkMessage.Put(network)) }
-
-        override fun onCapabilitiesChanged(
-            network: Network, networkCapabilities: NetworkCapabilities
-        ) { // it's a good idea to refresh capabilities
-            runBlocking { networkActor.send(NetworkMessage.Update(network)) }
+        private fun send(message: NetworkMessage) {
+            if (networkActor.trySend(message).isFailure) {
+                Logs.w("Failed to dispatch default network callback: $message")
+            }
         }
 
-        override fun onLost(network: Network) =
-            runBlocking { networkActor.send(NetworkMessage.Lost(network)) }
+        override fun onAvailable(network: Network) = send(NetworkMessage.Put(network))
+
+        override fun onLost(network: Network) = send(NetworkMessage.Lost(network))
     }
 
+    @Volatile
     private var fallback = false
+    private var registered = false
     private val request = NetworkRequest.Builder().apply {
         addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
         addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
@@ -144,11 +167,22 @@ object DefaultNetworkListener {
                     // known bug on API 23: https://stackoverflow.com/a/33509180/2245107
                 }
             }
+            registered = true
         } catch (e: Exception) {
             Logs.w(e)
             fallback = true
+            registered = false
         }
     }
 
-    private fun unregister() = SagerNet.connectivity.unregisterNetworkCallback(Callback)
+    private fun unregister() {
+        if (!registered) return
+        try {
+            SagerNet.connectivity.unregisterNetworkCallback(Callback)
+        } catch (e: Exception) {
+            Logs.w(e)
+        } finally {
+            registered = false
+        }
+    }
 }
