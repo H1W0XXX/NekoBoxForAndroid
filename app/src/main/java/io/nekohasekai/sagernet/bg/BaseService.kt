@@ -4,6 +4,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.Network
 import android.os.*
 import android.widget.Toast
 import io.nekohasekai.sagernet.Action
@@ -80,6 +81,14 @@ class BaseService {
 
         val binder = Binder(this)
         var connectingJob: Job? = null
+
+        // The network the core's upstream sockets were last opened on. Survives
+        // "no network" gaps, so wifi -> (nothing) -> cellular is still seen as a change.
+        @Volatile
+        var upstreamNetwork: Network? = null
+
+        @Volatile
+        var upstreamNetworkLost = false
 
         fun changeState(s: State, msg: String? = null) {
             if (state == s && msg == null) return
@@ -229,6 +238,8 @@ class BaseService {
             }
             DefaultNetworkListener.stop(this)
             SagerNet.underlyingNetwork = null
+            data.upstreamNetwork = null
+            data.upstreamNetworkLost = false
         }
 
         fun stopRunner(restart: Boolean = false, msg: String? = null) {
@@ -269,15 +280,37 @@ class BaseService {
         }
 
         suspend fun preInit() {
-            DefaultNetworkListener.start(this) { network ->
-                val oldNetwork = SagerNet.underlyingNetwork
-                if (oldNetwork != network) {
-                    SagerNet.underlyingNetwork = network
-                    DataStore.vpnService?.updateUnderlyingNetwork(network)
-                    Logs.d("Underlying network changed: $oldNetwork -> $network")
-                    if (oldNetwork != null && DataStore.networkChangeResetConnections) {
-                        Libcore.resetAllConnections(true)
-                    }
+            DefaultNetworkListener.start(this) { onUnderlyingNetworkChanged(it) }
+        }
+
+        /**
+         * Called (serially) by [DefaultNetworkListener] with the new default network,
+         * or null when the default network is lost and nothing replaced it yet.
+         */
+        fun onUnderlyingNetworkChanged(network: Network?) {
+            val data = data
+            if (network == null) {
+                // Keep SagerNet.underlyingNetwork: a dead handle makes direct DNS fail fast,
+                // while a null one would send those queries into our own tun.
+                // Remember the loss so the next network always resets the core, and let
+                // the system track the default network for the VPN in the meantime.
+                data.upstreamNetworkLost = true
+                DataStore.vpnService?.updateUnderlyingNetwork(null)
+                Logs.d("Underlying network lost: ${data.upstreamNetwork}")
+                return
+            }
+
+            val oldNetwork = data.upstreamNetwork
+            val changed = oldNetwork != null && (data.upstreamNetworkLost || oldNetwork != network)
+            data.upstreamNetwork = network
+            data.upstreamNetworkLost = false
+            SagerNet.underlyingNetwork = network
+            DataStore.vpnService?.updateUnderlyingNetwork(network)
+
+            if (changed) {
+                Logs.d("Underlying network changed: $oldNetwork -> $network")
+                if (DataStore.networkChangeResetConnections) {
+                    Libcore.resetNetwork()
                 }
             }
         }

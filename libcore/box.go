@@ -32,7 +32,21 @@ func init() {
 	dialer.DoNotSelectInterface = true
 }
 
-var mainInstance *BoxInstance
+// mainInstanceAccess guards mainInstance and protectCloser. They are written by
+// SetAsMain / Close and read from other threads (network listener, url test).
+//
+// Lock order: BoxInstance.access -> mainInstanceAccess. Never take an instance
+// lock while holding mainInstanceAccess.
+var (
+	mainInstanceAccess sync.Mutex
+	mainInstance       *BoxInstance
+)
+
+func getMainInstance() *BoxInstance {
+	mainInstanceAccess.Lock()
+	defer mainInstanceAccess.Unlock()
+	return mainInstance
+}
 
 func VersionBox() string {
 	version := []string{
@@ -65,6 +79,34 @@ func ResetAllConnections(system bool) {
 	} else {
 		log.Println("TODO: Reset user connections")
 	}
+}
+
+// ResetNetwork must be called after the underlying (physical) network changed.
+//
+// Sockets opened on the previous network never recover on their own, so besides
+// closing tracked connections this also resets what conntrack cannot see:
+// multiplex / QUIC sessions held by outbounds and the persistent connections
+// and cache of the DNS transports.
+func ResetNetwork() {
+	defer device.DeferPanicToError("ResetNetwork", func(err error) { log.Println(err) })
+
+	instance := getMainInstance()
+	if instance == nil || !instance.resetNetwork() {
+		conntrack.Close()
+	}
+	log.Println("Reset network done")
+}
+
+func (b *BoxInstance) resetNetwork() bool {
+	b.access.Lock()
+	defer b.access.Unlock()
+
+	if b.state != 1 || b.Box == nil {
+		return false
+	}
+	// closes conntrack, notifies outbounds, resets DNS
+	b.Box.Router().ResetNetwork()
+	return true
 }
 
 type BoxInstance struct {
@@ -151,10 +193,7 @@ func (b *BoxInstance) Close() (err error) {
 	b.state = 2
 
 	// clear main instance
-	if mainInstance == b {
-		mainInstance = nil
-		goServeProtect(false)
-	}
+	b.clearMain()
 
 	// close box
 	if b.cancel != nil {
@@ -181,8 +220,20 @@ func (b *BoxInstance) Wake() {
 }
 
 func (b *BoxInstance) SetAsMain() {
+	mainInstanceAccess.Lock()
+	defer mainInstanceAccess.Unlock()
 	mainInstance = b
 	goServeProtect(true)
+}
+
+// clearMain unsets b as the main instance, if it still is.
+func (b *BoxInstance) clearMain() {
+	mainInstanceAccess.Lock()
+	defer mainInstanceAccess.Unlock()
+	if mainInstance == b {
+		mainInstance = nil
+		goServeProtect(false)
+	}
 }
 
 func (b *BoxInstance) SetV2rayStats(outbounds string) {
@@ -224,18 +275,20 @@ func UrlTest(i *BoxInstance, link string, timeout int32) (latency int32, err err
 		return speedtest.UrlTest(boxapi.CreateProxyHttpClient(i.Box, connectionTracker), link, timeout, speedtest.UrlTestStandard_RTT)
 	}
 	// test direct
-	if mainInstance == nil {
+	main := getMainInstance()
+	if main == nil {
 		return speedtest.UrlTest(boxapi.CreateProxyHttpClient(nil, nil), link, timeout, speedtest.UrlTestStandard_RTT)
 	}
 	// test mainInstance
-	if mainInstance.v2api != nil {
-		connectionTracker = mainInstance.v2api.StatsService()
+	if main.v2api != nil {
+		connectionTracker = main.v2api.StatsService()
 	}
-	return speedtest.UrlTest(boxapi.CreateProxyHttpClient(mainInstance.Box, connectionTracker), link, timeout, speedtest.UrlTestStandard_RTT)
+	return speedtest.UrlTest(boxapi.CreateProxyHttpClient(main.Box, connectionTracker), link, timeout, speedtest.UrlTestStandard_RTT)
 }
 
 var protectCloser io.Closer
 
+// goServeProtect must be called with mainInstanceAccess held.
 func goServeProtect(start bool) {
 	if protectCloser != nil {
 		protectCloser.Close()
