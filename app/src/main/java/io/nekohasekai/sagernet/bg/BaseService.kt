@@ -42,6 +42,12 @@ class BaseService {
 
     interface ExpectedException
 
+    companion object {
+        // Roughly the idle timeout of common carrier NATs; shorter sleeps rarely kill connections.
+        private const val WAKE_RESET_MIN_SLEEP_MS = 5 * 60 * 1000L
+        private const val WAKE_RESET_MIN_INTERVAL_MS = 5 * 1000L
+    }
+
     class Data internal constructor(private val service: Interface) {
         var state = State.Stopped
         var proxy: ProxyInstance? = null
@@ -58,12 +64,13 @@ class BaseService {
                             proxy?.box?.sleep()
                         } else {
                             proxy?.box?.wake()
-                            if (DataStore.wakeResetConnections) {
-                                Libcore.resetAllConnections(true)
-                            }
+                            resetAfterWake("left doze")
                         }
                     }
                 }
+
+                Intent.ACTION_SCREEN_OFF -> onScreenOff()
+                Intent.ACTION_SCREEN_ON -> onScreenOn()
 
                 Action.RESET_UPSTREAM_CONNECTIONS -> runOnDefaultDispatcher {
                     Libcore.resetAllConnections(true)
@@ -89,6 +96,47 @@ class BaseService {
 
         @Volatile
         var upstreamNetworkLost = false
+
+        // Clock readings taken when the screen went off; 0 while it is on.
+        // Only touched from the main thread (broadcast receiver).
+        private var screenOffElapsed = 0L
+        private var screenOffUptime = 0L
+        private var lastWakeReset = 0L
+
+        fun onScreenOff() {
+            screenOffElapsed = SystemClock.elapsedRealtime()
+            screenOffUptime = SystemClock.uptimeMillis()
+        }
+
+        /**
+         * While the CPU is suspended no TCP keepalive is sent, and in Doze our sockets
+         * are firewalled, so NAT mappings expire and servers give up without us ever
+         * seeing a FIN/RST. Apps behind the tun never notice either: their side of the
+         * connection is terminated locally and stays "healthy", so they keep writing
+         * into dead upstream sockets until their own timeouts fire.
+         *
+         * elapsedRealtime counts suspend time and uptimeMillis does not, so their
+         * difference is how long the device really slept. Transfers that kept the
+         * CPU awake while the screen was off are therefore left alone.
+         */
+        fun onScreenOn() {
+            val offElapsed = screenOffElapsed
+            if (offElapsed == 0L) return
+            screenOffElapsed = 0L
+            val slept = (SystemClock.elapsedRealtime() - offElapsed) -
+                    (SystemClock.uptimeMillis() - screenOffUptime)
+            if (slept >= WAKE_RESET_MIN_SLEEP_MS) resetAfterWake("slept ${slept / 1000}s")
+        }
+
+        fun resetAfterWake(reason: String) {
+            if (!DataStore.wakeResetConnections || state != State.Connected) return
+            // leaving doze and the screen turning on usually arrive together
+            val now = SystemClock.elapsedRealtime()
+            if (lastWakeReset != 0L && now - lastWakeReset < WAKE_RESET_MIN_INTERVAL_MS) return
+            lastWakeReset = now
+            Logs.d("Reset network after wake: $reason")
+            runOnDefaultDispatcher { Libcore.resetNetwork() }
+        }
 
         fun changeState(s: State, msg: String? = null) {
             if (state == s && msg == null) return
@@ -358,6 +406,8 @@ class BaseService {
                         addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
                     }
                     addAction(Action.RESET_UPSTREAM_CONNECTIONS)
+                    addAction(Intent.ACTION_SCREEN_OFF)
+                    addAction(Intent.ACTION_SCREEN_ON)
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     registerReceiver(
