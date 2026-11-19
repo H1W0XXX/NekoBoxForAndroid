@@ -5,7 +5,6 @@ import android.annotation.SuppressLint
 import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Network
 import android.net.ProxyInfo
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -137,7 +136,9 @@ class VpnService : BaseVpnService(),
             }
         }
 
-        val configuredNetwork = configureUnderlyingNetwork(builder)
+        // Protected upstream sockets follow the system default. Leave the VPN's
+        // underlying networks unset so Android reports that same default to apps
+        // even before our asynchronous network callback processes a handover.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(metered)
 
         // app route
@@ -225,44 +226,10 @@ class VpnService : BaseVpnService(),
                 throw IllegalStateException("VpnService stopped while establishing VPN")
             }
             conn = established
-            // The default network may have changed while the builder was being set up;
-            // updateUnderlyingNetwork() ignored it because there was no connection yet.
-            val currentNetwork = currentUnderlyingNetwork()
-            if (currentNetwork != configuredNetwork &&
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1
-            ) {
-                setUnderlyingNetworks(currentNetwork?.let { arrayOf(it) })
-            }
             established
         }
 
         return connection.fd
-    }
-
-    /** The usable default network, or null if unknown / currently lost. */
-    private fun currentUnderlyingNetwork(): Network? =
-        if (data.upstreamNetworkLost) null else SagerNet.underlyingNetwork
-
-    private fun configureUnderlyingNetwork(builder: Builder): Network? {
-        val network = currentUnderlyingNetwork()
-        if (network != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
-            builder.setUnderlyingNetworks(arrayOf(network))
-        }
-        return network
-    }
-
-    fun updateUnderlyingNetwork(network: Network?) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
-            synchronized(connectionLock) {
-                if (conn == null) return
-                // null = follow the system default network. Never pass an empty array:
-                // it declares the VPN as having no connectivity at all until we
-                // are told about the next network.
-                if (!setUnderlyingNetworks(network?.let { arrayOf(it) })) {
-                    Logs.w("Failed to update VPN underlying network: $network")
-                }
-            }
-        }
     }
 
     override fun onRevoke() = stopRunner()

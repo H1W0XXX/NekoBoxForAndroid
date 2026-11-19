@@ -340,10 +340,8 @@ class BaseService {
             if (network == null) {
                 // Keep SagerNet.underlyingNetwork: a dead handle makes direct DNS fail fast,
                 // while a null one would send those queries into our own tun.
-                // Remember the loss so the next network always resets the core, and let
-                // the system track the default network for the VPN in the meantime.
+                // Remember the loss so the next network resets the core.
                 data.upstreamNetworkLost = true
-                DataStore.vpnService?.updateUnderlyingNetwork(null)
                 Logs.d("Underlying network lost: ${data.upstreamNetwork}")
                 return
             }
@@ -353,7 +351,6 @@ class BaseService {
             data.upstreamNetwork = network
             data.upstreamNetworkLost = false
             SagerNet.underlyingNetwork = network
-            DataStore.vpnService?.updateUnderlyingNetwork(network)
 
             if (changed) {
                 Logs.d("Underlying network changed: $oldNetwork -> $network")
