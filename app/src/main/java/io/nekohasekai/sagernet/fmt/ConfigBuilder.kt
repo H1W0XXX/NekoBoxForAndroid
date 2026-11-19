@@ -711,7 +711,7 @@ fun buildConfig(
                 dns.fakeip = DNSFakeIPOptions().apply {
                     enabled = true
                     inet4_range = "198.18.0.0/15"
-                    inet6_range = "fc00::/18"
+                    inet6_range = "${VpnService.FAKEDNS_VLAN6_NETWORK}/${VpnService.FAKEDNS_VLAN6_PREFIX}"
                 }
                 dns.servers.add(DNSServerOptions().apply {
                     address = "fakeip"
