@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/matsuridayo/libneko/neko_log"
 	"github.com/sagernet/sing-box/adapter"
@@ -21,6 +22,7 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	N "github.com/sagernet/sing/common/network"
+	"golang.org/x/sys/unix"
 )
 
 var boxPlatformInterfaceInstance platform.Interface = &boxPlatformInterfaceWrapper{}
@@ -50,7 +52,23 @@ func (w *boxPlatformInterfaceWrapper) AutoDetectInterfaceControl(fd int) error {
 		return nil
 	}
 	// bg process call VPNService
-	return intfBox.AutoDetectInterfaceControl(int32(fd))
+	return protectOutboundSocket(fd)
+}
+
+func protectOutboundSocket(fd int) error {
+	if err := intfBox.AutoDetectInterfaceControl(int32(fd)); err != nil {
+		return err
+	}
+	// A shared SSH transport can keep accepting channels while its TCP socket
+	// retransmits for minutes. Bound the wait for ACKs without polling idle links.
+	protocol, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_PROTOCOL)
+	if err == nil && protocol == unix.IPPROTO_TCP {
+		const ackTimeout = 30 * time.Second
+		if err := unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_USER_TIMEOUT, int(ackTimeout.Milliseconds())); err != nil {
+			log.Printf("set outbound TCP user timeout: %v", err)
+		}
+	}
+	return nil
 }
 
 func (w *boxPlatformInterfaceWrapper) OpenTun(options *tun.Options, platformOptions option.TunPlatformOptions) (tun.Tun, error) {

@@ -296,7 +296,7 @@ func goServeProtect(start bool) {
 	}
 	if start {
 		protectCloser = protect_server.ServeProtect("protect_path", false, 0, func(fd int) {
-			intfBox.AutoDetectInterfaceControl(int32(fd))
+			_ = protectOutboundSocket(fd)
 		})
 	}
 }
