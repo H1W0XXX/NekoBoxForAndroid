@@ -59,7 +59,7 @@ class BaseService {
                 Action.RELOAD -> service.reload()
                 // Action.SWITCH_WAKE_LOCK -> runOnDefaultDispatcher { service.switchWakeLock() }
                 PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED -> {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    if (state == State.Connected && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                         if (SagerNet.power.isDeviceIdleMode) {
                             proxy?.box?.sleep()
                         } else {
@@ -70,7 +70,7 @@ class BaseService {
                 }
 
                 Intent.ACTION_SCREEN_OFF -> onScreenOff()
-                Intent.ACTION_SCREEN_ON -> onScreenOn()
+                Intent.ACTION_SCREEN_ON, Intent.ACTION_USER_PRESENT -> onScreenOn()
 
                 Action.RESET_UPSTREAM_CONNECTIONS -> runOnDefaultDispatcher {
                     Libcore.resetAllConnections(true)
@@ -120,6 +120,11 @@ class BaseService {
          * CPU awake while the screen was off are therefore left alone.
          */
         fun onScreenOn() {
+            // A late or missed idle-exit broadcast must not leave the core paused.
+            if (state == State.Connected && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                !SagerNet.power.isDeviceIdleMode) {
+                proxy?.box?.wake()
+            }
             val offElapsed = screenOffElapsed
             if (offElapsed == 0L) return
             screenOffElapsed = 0L
@@ -328,14 +333,15 @@ class BaseService {
         }
 
         suspend fun preInit() {
-            DefaultNetworkListener.start(this) { onUnderlyingNetworkChanged(it) }
+            DefaultNetworkListener.start(this, ::onUnderlyingNetworkChanged)
         }
 
         /**
          * Called (serially) by [DefaultNetworkListener] with the new default network,
          * or null when the default network is lost and nothing replaced it yet.
+         * [revalidated] signals that the same network lost and regained internet validation.
          */
-        fun onUnderlyingNetworkChanged(network: Network?) {
+        fun onUnderlyingNetworkChanged(network: Network?, revalidated: Boolean) {
             val data = data
             if (network == null) {
                 // Keep SagerNet.underlyingNetwork: a dead handle makes direct DNS fail fast,
@@ -352,8 +358,8 @@ class BaseService {
             data.upstreamNetworkLost = false
             SagerNet.underlyingNetwork = network
 
-            if (changed) {
-                Logs.d("Underlying network changed: $oldNetwork -> $network")
+            if (changed || revalidated) {
+                Logs.d("Underlying network changed: $oldNetwork -> $network, revalidated=$revalidated")
                 if (DataStore.networkChangeResetConnections) {
                     Libcore.resetNetwork()
                 }
@@ -405,6 +411,7 @@ class BaseService {
                     addAction(Action.RESET_UPSTREAM_CONNECTIONS)
                     addAction(Intent.ACTION_SCREEN_OFF)
                     addAction(Intent.ACTION_SCREEN_ON)
+                    addAction(Intent.ACTION_USER_PRESENT)
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     registerReceiver(
@@ -442,6 +449,9 @@ class BaseService {
 
                     startProcesses()
                     data.changeState(State.Connected)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && SagerNet.power.isDeviceIdleMode) {
+                        proxy.box.sleep()
+                    }
 
                     lateInit()
                 } catch (_: CancellationException) { // if the job was cancelled, it is canceller's responsibility to call stopRunner

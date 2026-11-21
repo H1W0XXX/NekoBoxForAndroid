@@ -19,7 +19,7 @@ import java.net.UnknownHostException
 
 object DefaultNetworkListener {
     private sealed class NetworkMessage {
-        class Start(val key: Any, val listener: (Network?) -> Unit) : NetworkMessage() {
+        class Start(val key: Any, val listener: (Network?, Boolean) -> Unit) : NetworkMessage() {
             val response = CompletableDeferred<Unit>()
         }
 
@@ -33,22 +33,29 @@ object DefaultNetworkListener {
 
         class Put(val network: Network) : NetworkMessage()
         class Lost(val network: Network) : NetworkMessage()
+        class Validation(val network: Network, val validated: Boolean) : NetworkMessage()
     }
 
     private val networkActor = GlobalScope.actor<NetworkMessage>(
         Dispatchers.Default,
         capacity = Channel.UNLIMITED,
     ) {
-        val listeners = mutableMapOf<Any, (Network?) -> Unit>()
+        val listeners = mutableMapOf<Any, (Network?, Boolean) -> Unit>()
         var network: Network? = null
+        // null until the current network has passed validation at least once.
+        var validated: Boolean? = null
         val pendingRequests = arrayListOf<NetworkMessage.Get>()
 
-        fun notifyListener(listener: (Network?) -> Unit, value: Network?) {
-            runCatching { listener(value) }.onFailure(Logs::w)
+        fun notifyListener(
+            listener: (Network?, Boolean) -> Unit,
+            value: Network?,
+            revalidated: Boolean = false,
+        ) {
+            runCatching { listener(value, revalidated) }.onFailure(Logs::w)
         }
 
-        fun notifyListeners(value: Network?) {
-            listeners.values.toList().forEach { notifyListener(it, value) }
+        fun notifyListeners(value: Network?, revalidated: Boolean = false) {
+            listeners.values.toList().forEach { notifyListener(it, value, revalidated) }
         }
 
         for (message in channel) when (message) {
@@ -76,6 +83,7 @@ object DefaultNetworkListener {
             }
 
             is NetworkMessage.Put -> {
+                if (network != message.network) validated = null
                 network = message.network
                 pendingRequests.forEach { it.response.complete(message.network) }
                 pendingRequests.clear()
@@ -86,10 +94,16 @@ object DefaultNetworkListener {
                 network = null
                 notifyListeners(null)
             }
+
+            is NetworkMessage.Validation -> if (network == message.network) {
+                val recovered = validated == false && message.validated
+                if (validated != null || message.validated) validated = message.validated
+                if (recovered) notifyListeners(network, revalidated = true)
+            }
         }
     }
 
-    suspend fun start(key: Any, listener: (Network?) -> Unit) =
+    suspend fun start(key: Any, listener: (Network?, Boolean) -> Unit) =
         NetworkMessage.Start(key, listener).run {
             networkActor.send(this)
             response.await()
@@ -119,6 +133,13 @@ object DefaultNetworkListener {
         override fun onAvailable(network: Network) = send(NetworkMessage.Put(network))
 
         override fun onLost(network: Network) = send(NetworkMessage.Lost(network))
+
+        override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+            if (Build.VERSION.SDK_INT >= 23) {
+                val validated = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                send(NetworkMessage.Validation(network, validated))
+            }
+        }
     }
 
     @Volatile

@@ -82,8 +82,8 @@ class SagerNet : Application(),
             Theme.apply(this)
             Theme.applyNightTheme()
             runOnDefaultDispatcher {
-                DefaultNetworkListener.start(this) {
-                    underlyingNetwork = it
+                DefaultNetworkListener.start(this) { network, _ ->
+                    underlyingNetwork = network
                 }
 
                 updateNotificationChannels()
